@@ -35,85 +35,7 @@ def read_csv():
 
 ###########################################################
 #
-# App
-
-_start    = None
-_position = 0
-_pnl      = 0
-_data     = None
-
-def handle_query(x):
-	now = datetime.datetime.now() - _start
-	print 'Query received; %s elapsed' % now
-	
-	prev  = _data[0]
-	start = prev[0]
-	
-	for row in _data:
-		if (row[0] - start) > now:
-			break
-		prev = row
-	
-	return {
-		'bid': prev[1],
-		'ask': prev[2]
-	}
-
-def handle_buy(x):
-	global _position
-	global _pnl
-
-	buy       =  float(handle_query(None)['bid'])
-	_position += float(x)
-	_pnl      -= float(x) * buy
-
-	print "Bought %s at $%s" % (float(x), buy)
-	print "Position: %s" % _position
-	print "PnL: %s" % _pnl
-	
-	return {
-		'pnl': _pnl,
-		'position': _position
-	}
-
-
-def handle_sell(x):
-	global _position
-	global _pnl
-
-	sell      =  float(handle_query(None)['ask'])
-	_position -= float(x)
-	_pnl      += float(x) * sell
-
-	print "Sold %s at $%s" % (float(x), sell)
-	print "Position: %s" % _position
-	print "PnL: %s" % _pnl
-
-	return {
-		'pnl': _pnl,
-		'position': _position
-	}	
-
-__app__ = {
-	'/query/': handle_query,
-	'/buy/':   handle_buy,
-	'/sell/':  handle_sell
-}
-
-###########################################################
-#
 # Server
-
-class RequestHandler(BaseHTTPRequestHandler):
-
-	def do_GET(self):
-		for route, handler in __app__.iteritems():
-			if None != re.search(route, self.path):
-				self.send_response(200)
-				self.send_header('Content-Type', 'application/json')
-				self.end_headers()
-				self.wfile.write(json.dumps(handler(self.path[len(route):])))
-				return
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 	allow_reuse_address = True
@@ -121,27 +43,85 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 		self.socket.close()
 		HTTPServer.shutdown(self)
 
-class SimpleHttpServer():
-	def __init__(self, ip, port):
-		self.server = ThreadedHTTPServer((ip,port), RequestHandler)
+def _get(req_handler, routes):
+	for name, handler in routes.__class__.__dict__.iteritems():
+		if hasattr(handler, "__route__") and None != re.search(handler.__route__, req_handler.path):
+			req_handler.send_response(200)
+			req_handler.send_header('Content-Type', 'application/json')
+			req_handler.end_headers()
+			query = req_handler.path[len(handler.__route__):]
+			data  = json.dumps(handler(routes, query))
+			req_handler.wfile.write(data)
+			return
 
-	def start(self):
-		self.server_thread = threading.Thread(target=self.server.serve_forever)
-		self.server_thread.daemon = True
-		self.server_thread.start()
+def run(routes, host = '0.0.0.0', port = 8080):
 
-	def waitForThread(self):
-		self.server_thread.join()
+	class RequestHandler(BaseHTTPRequestHandler):
+		def log_message(self, *args, **kwargs):
+			pass
+		def do_GET(self):
+			_get(self, routes)
 
-	def stop(self):
-		self.server.shutdown()
-		self.waitForThread()
+	server = ThreadedHTTPServer((host, port), RequestHandler)
+	thread = threading.Thread(target = server.serve_forever)
+	thread.daemon = True
+	thread.start()
 
-def run_server():
-	server = SimpleHttpServer('0.0.0.0', 8080)
 	print 'HTTP server started on port 8080'
+	
+	thread.join()
+	server.shutdown()
 	server.start()
 	server.waitForThread()
+
+def route(path):
+	def _route(f):
+		setattr(f, '__route__', path)
+		return f
+	return _route
+
+###########################################################
+#
+# App
+
+class App(object):
+
+	def __init__(self):		
+		self._start    = datetime.datetime.now()
+		self._position = 0
+		self._pnl      = 0
+		self._data     = list(read_csv())
+
+	@route('/query/')
+	def handle_query(self, x):
+		now = datetime.datetime.now() - self._start
+		print 'Query received @ t%s' % now
+		
+		prev  = self._data[0]
+		start = prev[0]
+		
+		for row in self._data:
+			if (row[0] - start) > now:
+				break
+			prev = row
+		
+		return {
+			'bid': prev[1],
+			'ask': prev[2]
+		}
+
+	@route('/sell/')
+	def handle_sell(self, x):
+		sell =  float(self.handle_query(None)['ask'])
+		self._position -= float(x)
+		self._pnl      += float(x) * sell
+
+		print "Sold %s at $%s. Position: %s, PnL: %s" % (float(x), sell, self._position, self._pnl)
+
+		return {
+			'pnl':      self._pnl,
+			'position': self._position
+		}	
 
 ###########################################################
 #
@@ -150,9 +130,7 @@ def run_server():
 if __name__ == '__main__':	
 	if not os.path.isfile('test.csv'):
 		generate_csv()
-	_data  = list(read_csv())
-	_start = datetime.datetime.now()
-	run_server()
+	run(App())
 
 
 
