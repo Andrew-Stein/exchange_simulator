@@ -1,13 +1,15 @@
 
-import csv
+from server import *
 
 import os.path
 import dateutil.parser
+
+import csv
 import threading
 import re
 import json
 
-
+from itertools import izip
 from copy     import copy
 from random   import normalvariate, random
 from datetime import timedelta, datetime
@@ -20,19 +22,22 @@ from SocketServer   import ThreadingMixIn
 #
 # Config
 
+# Sim params
 SIM_LENGTH  = timedelta(hours = 8)
-MARKET_OPEN = datetime.today().replace(hour = 8, minute = 0, second = 0)
-    
+MARKET_OPEN = datetime.today().replace(hour = 0, minute = 30, second = 0)
 
+# Trades mid
 MIN_SPD = 2.0
 MAX_SPD = 6.0
 STD_SPD = 0.1
 
+# Trades
+OVERLAP = 4
+
+# Mid
 MIN_PX  = 60.0
 MAX_PX  = 150.0
 STD_PX  = 0.2
-
-OVERLAP = 4
 
 ###########################################################
 #
@@ -53,69 +58,62 @@ def market(t0):
     ts = times(t0, 50, 500, 50)
     ps = bwalk(MIN_PX, MAX_PX, STD_PX)
     ss = bwalk(MIN_SPD, MAX_SPD, STD_SPD)
-    for t, px, spd in izip(ts, ps, ss):
-        bid = px - abs(spd / 2)
-        ask = px + abs(spd / 2)
-        yield t, px, bid, ask
+    return izip(ts, ps, ss)
         
 def orders(hist):
-    for t, _, bid, ask in hist:
+    for t, px, spd in hist:
         side  = 'sell' if random() > 0.5 else 'buy'
-        dist  = (ask - bid) / OVERLAP
-        order = normalvariate(bid if side == 'buy' else ask, dist)
-        size  = ceil(abs(normalvariate(0, 100)))
+        dist  = spd / OVERLAP
+        sig   = px + (- spd / 2 if side == 'buy' else spd / 2)
+        order = round(normalvariate(sig, dist), 2)
+        size  = int(abs(normalvariate(0, 100)))
         yield t, side, order, size
 
-# from itertools import izip, imap, islice
-    
-# hist = list(islice(market(datetime.now()), 0, 1000))
-# _, pxs, bids, asks     = zip(*hist)
-# ts, sides, ords, sizes = zip(*list(orders(hist)))
+###########################################################
+#
+# Order Book
 
-# def _plot_orders(ords):
-#     get_ipython().magic(u'matplotlib inline')
+def add_book(book, order, size, _age = 10):
+    yield order, size, _age
+    for o, s, age in book:
+        if age > 0:
+            yield o, s, age - 1
 
-#     import matplotlib.pyplot as plt
-
-#     ts, sides, ords, sizes = zip(*list(ords))
-#     plt.figure(figsize=(15, 5))
-
-#     plt.plot(ts, pxs, 'm')
-#     plt.plot(ts, bids, 'c')
-#     plt.plot(ts, asks, 'c')
-
-#     plt.scatter(ts, ords, c = map(lambda x: 'b' if x == 'buy' else 'r', sides))
-
-#     plt.axis([ts[0], ts[-1], None, None])
-#     plt.show()
-    
-# _plot_orders(orders(hist))
-
-
-def order_book(orders):
-    book = {'buy': [], 'sell': []}
-    for t, side, order, size in orders:
-        book[side] = sorted(book[side] + [(order, size)], key = lambda x: x[0])
-        yield copy(book)                   
-
-def clear_bid(order, size, book):
-    if order > book[0][0]:
-        if size < book[0][1]:
-            return [(book[0][0], book[0][1] - size)] + book[1:]
-        else:
-            return clear_bid(order, size - book[0][1], book[1:])
+def clear_order(order, size, book, notional = 0):
+    (top_order, top_size, age), tail = book[0], book[1:]
+    if order > top_order:
+        notional += min(size, top_size) * top_order
+        sdiff = top_size - size
+        if sdiff > 0:
+            return notional, list(add_book(tail, top_order, sdiff, age))
+        elif len(tail) > 0:
+            return clear_order(order, -sdiff, tail, notional)
         
-def top_bid(books):
-    for book in books:
-        while book['sell'] and book['buy']:
-            order, size = book['buy'][-1]
-            new_book = clear_bid(order, size, book['sell'])
-            if new_book:
-                book['sell'] = new_book
-                book['buy']  = book['buy'][:-1]
-            else:
-                break
-        yield book['buy'][-1][0] if book['buy'] else None
+def clear_book(buy = None, sell = None):
+    while buy and sell:
+        order, size, _ = buy[0]
+        new_book = clear_order(order, size, sell)
+        if new_book:
+            sell = new_book[1]
+            buy  = buy[1:]
+        else:
+            break
+    return buy, sell
+
+def order_book(orders, book):
+    for t, side, order, size in orders:
+        new = add_book(book.get(side, []), order, size)
+        book[side] = sorted(new, reverse = side == 'buy', key = lambda x: x[0])
+        bids, asks = clear_book(**book)
+        yield t, bids, asks
+        
+def top(bids, asks):
+    for bid, ask in izip(bids, asks):
+        yield bid and bid[0][0], ask and ask[0][0]
+
+###########################################################
+#
+# Test Data Persistence
 
 def generate_csv():
     with open('test.csv', 'wb') as f:
@@ -128,7 +126,7 @@ def generate_csv():
 def read_csv():
     with open('test.csv', 'rb') as f:
         for time, side, order, size in csv.reader(f):
-            yield dateutil.parser.parse(time), side, order, size
+            yield dateutil.parser.parse(time), side, float(order), int(size)
 
 ###########################################################
 #
@@ -166,7 +164,9 @@ def run(routes, host = '0.0.0.0', port = 8080):
 
     print 'HTTP server started on port 8080'
 
-    thread.join()
+    while True:
+        from time import sleep
+        sleep(1)
     server.shutdown()
     server.start()
     server.waitForThread()
@@ -183,46 +183,32 @@ def route(path):
 
 class App(object):
 
-    def __init__(self):     
-        self._start = datetime.datetime.now()
-        self._data  = list(read_csv())
-        self._bids, self._asks = [], []
-
-    def _update_book(self, now):
-        while self._data[0][0] < now:
-            
+    def __init__(self):
+        self._book     = dict()
+        self._data     = order_book(read_csv(), self._book)
+        self._rt_start = datetime.now()
+        self._sim_start, _, _  = self._data.next()
 
     @route('/query/')
     def handle_query(self, x):
-        now = datetime.datetime.now() - self._start
-        print 'Query received @ t%s' % now
-        
-        prev  = self._data[0]
-        start = prev[0]
-        
-        for row in self._data:
-            if (row[0] - start) > now:
-                break
-            prev = row
-        
-        return {
-            'bid': prev[1],
-            'ask': prev[2]
-        }
+        sim_time = datetime.now() - self._rt_start
+        print 'Query received @ t%s' % sim_time
+        for t, bids, asks in self._data:
+            if t > self._sim_start + sim_time:
+                return list(top([bids], [asks]))[0]
 
     @route('/sell/')
     def handle_sell(self, x):
-        sell =  float(self.handle_query(None)['ask'])
-        self._position -= float(x)
-        self._pnl      += float(x) * sell
-
-        print "Sold %s at $%s. Position: %s, PnL: %s" % (float(x), sell, self._position, self._pnl)
-
-        return {
-            'pnl':      self._pnl,
-            'position': self._position
-        }   
-
+        sim_time = datetime.now() - self._rt_start
+        print 'Sell received @ t%s for %s' % (sim_time, x)
+        for t, bids, asks in self._data:
+            if t > self._sim_start + sim_time:
+                result = clear_order(float('inf'), float(x), self._book['buy'])
+                if result:
+                    self._book['buy'] = result[1]
+                    return result[0]
+                else:
+                    return "Unfilled"
 
 ###########################################################
 #
@@ -230,6 +216,7 @@ class App(object):
 
 if __name__ == '__main__':  
     if not os.path.isfile('test.csv'):
+        print "No data found, generating..."
         generate_csv()
     run(App())
 
