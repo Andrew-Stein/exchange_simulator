@@ -1,5 +1,4 @@
 
-from server import *
 
 import os.path
 import dateutil.parser
@@ -140,14 +139,15 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
 def _get(req_handler, routes):
     for name, handler in routes.__class__.__dict__.iteritems():
-        if hasattr(handler, "__route__") and None != re.search(handler.__route__, req_handler.path):
-            req_handler.send_response(200)
-            req_handler.send_header('Content-Type', 'application/json')
-            req_handler.end_headers()
-            query = req_handler.path[len(handler.__route__):]
-            data  = json.dumps(handler(routes, query))
-            req_handler.wfile.write(data)
-            return
+        if hasattr(handler, "__route__"):
+            if None != re.search(handler.__route__, req_handler.path):
+                req_handler.send_response(200)
+                req_handler.send_header('Content-Type', 'application/json')
+                req_handler.end_headers()
+                query = req_handler.path[len(handler.__route__):]
+                data  = json.dumps(handler(routes, query))
+                req_handler.wfile.write(data)
+                return
 
 def run(routes, host = '0.0.0.0', port = 8080):
 
