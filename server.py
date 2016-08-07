@@ -1,23 +1,40 @@
-
-
-import os.path
-import dateutil.parser
-
-import csv
-import threading
-import re
-import json
+################################################################################
+#
+#  Permission is hereby granted, free of charge, to any person obtaining a 
+#  copy of this software and associated documentation files (the "Software"), 
+#  to deal in the Software without restriction, including without limitation 
+#  the rights to use, copy, modify, merge, publish, distribute, sublicense, 
+#  and/or sell copies of the Software, and to permit persons to whom the 
+#  Software is furnished to do so, subject to the following conditions:
+#
+#  The above copyright notice and this permission notice shall be included in 
+#  all copies or substantial portions of the Software.
+#
+#  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS 
+#  OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, 
+#  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE 
+#  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER 
+#  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING 
+#  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER 
+#  DEALINGS IN THE SOFTWARE.
 
 from itertools import izip
-from copy     import copy
-from random   import normalvariate, random
-from datetime import timedelta, datetime
-from math     import ceil
+from random    import normalvariate, random
+from datetime  import timedelta, datetime
 
+import csv
+import dateutil.parser
+import os.path
+
+import operator
+import json
+import re
+import threading
+ 
 from BaseHTTPServer import BaseHTTPRequestHandler,HTTPServer
 from SocketServer   import ThreadingMixIn
 
-###########################################################
+################################################################################
 #
 # Config
 
@@ -25,70 +42,73 @@ from SocketServer   import ThreadingMixIn
 SIM_LENGTH  = timedelta(hours = 8)
 MARKET_OPEN = datetime.today().replace(hour = 0, minute = 30, second = 0)
 
-# Trades mid
-MIN_SPD = 2.0
-MAX_SPD = 6.0
-STD_SPD = 0.1
+#       min  / max  / std
+SPD  = (2.0,   6.0,   0.1)
+PX   = (60.0,  150.0, 0.2)
+FREQ = (50,    500,   50)
 
 # Trades
 OVERLAP = 4
 
-# Mid
-MIN_PX  = 60.0
-MAX_PX  = 150.0
-STD_PX  = 0.2
-
-###########################################################
+################################################################################
 #
 # Test Data
 
 def bwalk(min, max, std):
+    """ Generates a bounded random walk. """
     rng = max - min
     while True:
         max += normalvariate(0, std)
         yield abs((max % (rng * 2)) - rng) + min
 
-def times(t0, tmin, tmax, tsig):
-    for ms in bwalk(tmin, tmax, tsig):
-        yield t0
+def market(t0 = MARKET_OPEN):
+    """ Generates a random series of market conditions, 
+        (time, price, spread). 
+    """
+    for ms, px, spd in izip(bwalk(*FREQ), bwalk(*PX), bwalk(*SPD)):
+        yield t0, px, spd
         t0 += timedelta(milliseconds = abs(ms))
-
-def market(t0):
-    ts = times(t0, 50, 500, 50)
-    ps = bwalk(MIN_PX, MAX_PX, STD_PX)
-    ss = bwalk(MIN_SPD, MAX_SPD, STD_SPD)
-    return izip(ts, ps, ss)
         
 def orders(hist):
+    """ Generates a random set of limit orders (time, side, price, size) from
+        a series of market conditions.
+    """
     for t, px, spd in hist:
-        side  = 'sell' if random() > 0.5 else 'buy'
-        dist  = spd / OVERLAP
-        sig   = px + (- spd / 2 if side == 'buy' else spd / 2)
-        order = round(normalvariate(sig, dist), 2)
+        side, d  = ('sell', 2) if random() > 0.5 else ('buy', -2)
+        order = round(normalvariate(px + (spd / d), spd / OVERLAP), 2)
         size  = int(abs(normalvariate(0, 100)))
         yield t, side, order, size
+    
 
-###########################################################
+################################################################################
 #
 # Order Book
 
 def add_book(book, order, size, _age = 10):
+    """ Add a new order and size to a book, and age the rest of the book. """
     yield order, size, _age
     for o, s, age in book:
         if age > 0:
             yield o, s, age - 1
 
-def clear_order(order, size, book, notional = 0):
+def clear_order(order, size, book, op = operator.ge, _notional = 0):
+    """ Try to clear a sized order against a book, returning a tuple of 
+        (notional, new_book) if successful, and None if not.  _notional is a 
+        recursive accumulator and should not be provided by the caller.
+    """
     (top_order, top_size, age), tail = book[0], book[1:]
-    if order > top_order:
-        notional += min(size, top_size) * top_order
+    if op(order, top_order):
+        _notional += min(size, top_size) * top_order
         sdiff = top_size - size
         if sdiff > 0:
-            return notional, list(add_book(tail, top_order, sdiff, age))
+            return _notional, list(add_book(tail, top_order, sdiff, age))
         elif len(tail) > 0:
-            return clear_order(order, -sdiff, tail, notional)
+            return clear_order(order, -sdiff, tail, op, _notional)
         
 def clear_book(buy = None, sell = None):
+    """ Clears all crossed orders from a buy and sell book, returning the new
+        books uncrossed.
+    """
     while buy and sell:
         order, size, _ = buy[0]
         new_book = clear_order(order, size, sell)
@@ -100,43 +120,64 @@ def clear_book(buy = None, sell = None):
     return buy, sell
 
 def order_book(orders, book):
+    """ Generates a series of order books from a series of orders.  Order books 
+        are mutable lists, and mutating them during generation will affect the 
+        next turn!
+    """
     for t, side, order, size in orders:
         new = add_book(book.get(side, []), order, size)
         book[side] = sorted(new, reverse = side == 'buy', key = lambda x: x[0])
         bids, asks = clear_book(**book)
         yield t, bids, asks
-        
-def top(bids, asks):
-    for bid, ask in izip(bids, asks):
-        yield bid and bid[0][0], ask and ask[0][0]
 
-###########################################################
+################################################################################
 #
 # Test Data Persistence
 
 def generate_csv():
+    """ Generate a CSV of order history. """
     with open('test.csv', 'wb') as f:
         writer = csv.writer(f)
-        for t, side, order, size in orders(market(MARKET_OPEN)):
+        for t, side, order, size in orders(market()):
             if t > MARKET_OPEN + SIM_LENGTH:
                 break
             writer.writerow([t, side, order, size])
       
 def read_csv():
+    """ Read a CSV or order history into a list. """
     with open('test.csv', 'rb') as f:
         for time, side, order, size in csv.reader(f):
             yield dateutil.parser.parse(time), side, float(order), int(size)
 
-###########################################################
+################################################################################
 #
 # Server
 
 class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """ Boilerplate class for a multithreaded HTTP Server, with working 
+        shutdown.
+    """
     allow_reuse_address = True
     def shutdown(self):
+        """ Override MRO to shutdown properly. """
         self.socket.close()
         HTTPServer.shutdown(self)
 
+def route(path):
+    """ Decorator for a simple bottle-like web framework.  Routes path to the 
+        decorated method, with the rest of the path as an argument.
+    """
+    def _route(f):
+        setattr(f, '__route__', path)
+        return f
+    return _route
+
+def _read_params(path):
+    query = path.split('?')
+    if len(query) >1:
+        query = query[1].split('&')
+        return {k: v for k, v in map(lambda x: x.split('='), query)}
+        
 def _get(req_handler, routes):
     for name, handler in routes.__class__.__dict__.iteritems():
         if hasattr(handler, "__route__"):
@@ -144,26 +185,25 @@ def _get(req_handler, routes):
                 req_handler.send_response(200)
                 req_handler.send_header('Content-Type', 'application/json')
                 req_handler.end_headers()
-                query = req_handler.path[len(handler.__route__):]
-                data  = json.dumps(handler(routes, query))
+                params = _read_params(req_handler.path)
+                data = json.dumps(handler(routes, params)) + '\n'
                 req_handler.wfile.write(data)
                 return
 
 def run(routes, host = '0.0.0.0', port = 8080):
-
+    """ Runs a class as a server whose methods have been decorated with 
+        route. 
+    """
     class RequestHandler(BaseHTTPRequestHandler):
         def log_message(self, *args, **kwargs):
             pass
         def do_GET(self):
             _get(self, routes)
-
     server = ThreadedHTTPServer((host, port), RequestHandler)
     thread = threading.Thread(target = server.serve_forever)
     thread.daemon = True
     thread.start()
-
     print 'HTTP server started on port 8080'
-
     while True:
         from time import sleep
         sleep(1)
@@ -171,17 +211,17 @@ def run(routes, host = '0.0.0.0', port = 8080):
     server.start()
     server.waitForThread()
 
-def route(path):
-    def _route(f):
-        setattr(f, '__route__', path)
-        return f
-    return _route
-
-###########################################################
+################################################################################
 #
 # App
 
+ops = {
+    'buy':  operator.le,
+    'sell': operator.ge,
+}
+
 class App(object):
+    """ The trading game server application. """
 
     def __init__(self):
         self._book     = dict()
@@ -189,28 +229,52 @@ class App(object):
         self._rt_start = datetime.now()
         self._sim_start, _, _  = self._data.next()
 
-    @route('/query/')
+    @route('/query')
     def handle_query(self, x):
+        """ Takes no arguments, and yields the current top of the book;  the
+            best bid and ask and their sizes.
+        """
         sim_time = datetime.now() - self._rt_start
         print 'Query received @ t%s' % sim_time
         for t, bids, asks in self._data:
             if t > self._sim_start + sim_time:
-                return list(top([bids], [asks]))[0]
+                return {
+                    'timestamp': str(t),
+                    'top_bid': bids and {
+                        'price': bids[0][0],
+                        'size':  bids[0][1]
+                    },
+                    'top_ask': asks and {
+                        'price': asks[0][0],
+                        'size':  asks[0][1]
+                    }
+                }
 
-    @route('/sell/')
+    @route('/order')
     def handle_sell(self, x):
+        """ Tries to clear an order.  Expects query parameters for 'price', 
+            'quantity', and 'side'.
+        """
         sim_time = datetime.now() - self._rt_start
         print 'Sell received @ t%s for %s' % (sim_time, x)
         for t, bids, asks in self._data:
             if t > self._sim_start + sim_time:
-                result = clear_order(float('inf'), float(x), self._book['buy'])
+                avg_price = 0
+                size, price = float(x['qty']), float(x['price'])
+                side = 'buy' if x['side'] == 'sell' else 'sell'
+                result = clear_order(price, size, self._book[side], ops[side])
                 if result:
-                    self._book['buy'] = result[1]
-                    return result[0]
-                else:
-                    return "Unfilled"
+                    self._book[side] = result[1]
+                    avg_price = round(result[0] / size, 2)
+                return {
+                    'side'     : x['side'],
+                    'timestamp': str(t),
+                    'avg_price': avg_price,
+                    'qty':       avg_price and size,
+                }
+                
 
-###########################################################
+################################################################################
 #
 # Main
 
