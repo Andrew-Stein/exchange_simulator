@@ -21,10 +21,11 @@
 import urllib2
 import time
 import json
+import random
 
 # Server API URLs
-QUERY = "http://localhost:8080/query"
-ORDER = "http://localhost:8080/order?side=sell&qty={}&price={}"
+QUERY = "http://localhost:8080/query?id={}"
+ORDER = "http://localhost:8080/order?id={}&side=sell&qty={}&price={}"
 
 # Strategy config.  We will attempt to liquidate a position of INVENTORY shares,
 # by selling ORDER_SIZE @ top_bid - ORDER_DISCOUNT, once every N seconds.
@@ -35,7 +36,6 @@ INVENTORY      = 1000
 N = 5
 
 # Main
-		
 if __name__ == "__main__":
 
 	# Start with all shares and no profit
@@ -48,23 +48,23 @@ if __name__ == "__main__":
 		# Query the price once every N seconds.
 		for _ in xrange(N):
 			time.sleep(1)
-			quote = json.loads(urllib2.urlopen(QUERY).read())
+			quote = json.loads(urllib2.urlopen(QUERY.format(random.random())).read())
 			price = float(quote['top_bid']['price'])
 			print "Quoted at %s" % price
 
 		# Attempt to execute a sell order.
 		order_args = (ORDER_SIZE, price - ORDER_DISCOUNT)
 		print "Executing 'sell' of {:,} @ {:,}".format(*order_args)
-		url   = ORDER.format(*order_args)
+		url   = ORDER.format(random.random(), *order_args)
 		order = json.loads(urllib2.urlopen(url).read())
 
 		# Update the PnL if the order was filled.
 		if order['avg_price'] > 0:
 			price    = order['avg_price']
-			notional = float(price * 200)
+			notional = float(price * ORDER_SIZE)
 			pnl += notional
-			qty -= 200
-			print "Sold 200 for ${:,}/share, ${:,} notional".format(price, notional)
+			qty -= ORDER_SIZE
+			print "Sold {:,} for ${:,}/share, ${:,} notional".format(ORDER_SIZE, price, notional)
 			print "PnL ${:,}, Qty {:,}".format(pnl, qty)
 		else:
 			print "Unfilled order; $%s total, %s qty" % (pnl, qty)

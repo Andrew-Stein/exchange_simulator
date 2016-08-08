@@ -20,15 +20,15 @@ See also [client.py](https://github.com/texodus/exchange_simulator/blob/master/c
 
 Query:
 
-	$ curl 'http://localhost:8080/query'
-	{"top_ask": {"price": 129.18, "size": 70}, "timestamp": "2016-08-06 12:32:11.821574", "top_bid": {"price": 128.79, "size": 61}}
+	$ curl 'http://localhost:8080/query?id=1'
+	{"id": "1", "top_ask": {"price": 129.18, "size": 70}, "timestamp": "2016-08-06 12:32:11.821574", "top_bid": {"price": 128.79, "size": 61}}
 
 Filled order:
 
-	$ curl 'http://localhost:8080/order?side=sell&qty=100&price=125.0'
-	{"timestamp": "2016-08-06 12:32:20.860511", "qty": 100.0, "side": "sell", "avg_price": 129.5}
+	$ curl 'http://localhost:8080/order?id=2&side=sell&qty=100&price=125.0'
+	{"id": "2", timestamp": "2016-08-06 12:32:20.860511", "qty": 100.0, "side": "sell", "avg_price": 129.5}
 
 Unfilled order:
 
-	$ curl 'http://localhost:8080/order?side=sell&qty=100&price=135.0'
-	{"timestamp": "2016-08-06 12:32:24.990886", "qty": 0, "side": "sell", "avg_price": 0}
+	$ curl 'http://localhost:8080/order?id=3&side=sell&qty=100&price=135.0'
+	{"id": "3", timestamp": "2016-08-06 12:32:24.990886", "qty": 0, "side": "sell", "avg_price": 0}

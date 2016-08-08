@@ -39,15 +39,18 @@ from SocketServer   import ThreadingMixIn
 # Config
 
 # Sim params
+
 SIM_LENGTH  = timedelta(hours = 8)
 MARKET_OPEN = datetime.today().replace(hour = 0, minute = 30, second = 0)
 
+# Market parms
 #       min  / max  / std
 SPD  = (2.0,   6.0,   0.1)
 PX   = (60.0,  150.0, 0.2)
 FREQ = (50,    500,   50)
 
 # Trades
+
 OVERLAP = 4
 
 ################################################################################
@@ -172,33 +175,37 @@ def route(path):
         return f
     return _route
 
-def _read_params(path):
+def read_params(path):
+    """ Read query parameters into a dictionary if they are parseable,
+        otherwise returns None.
+    """
     query = path.split('?')
-    if len(query) >1:
+    if len(query) > 1:
         query = query[1].split('&')
-        return {k: v for k, v in map(lambda x: x.split('='), query)}
+        return dict(map(lambda x: x.split('='), query))
         
-def _get(req_handler, routes):
+def get(req_handler, routes):
+    """ Map a request to the appropriate route of a routes instance. """
     for name, handler in routes.__class__.__dict__.iteritems():
         if hasattr(handler, "__route__"):
             if None != re.search(handler.__route__, req_handler.path):
                 req_handler.send_response(200)
                 req_handler.send_header('Content-Type', 'application/json')
                 req_handler.end_headers()
-                params = _read_params(req_handler.path)
+                params = read_params(req_handler.path)
                 data = json.dumps(handler(routes, params)) + '\n'
                 req_handler.wfile.write(data)
                 return
 
 def run(routes, host = '0.0.0.0', port = 8080):
     """ Runs a class as a server whose methods have been decorated with 
-        route. 
+        @route. 
     """
     class RequestHandler(BaseHTTPRequestHandler):
         def log_message(self, *args, **kwargs):
             pass
         def do_GET(self):
-            _get(self, routes)
+            get(self, routes)
     server = ThreadedHTTPServer((host, port), RequestHandler)
     thread = threading.Thread(target = server.serve_forever)
     thread.daemon = True
@@ -239,24 +246,25 @@ class App(object):
         for t, bids, asks in self._data:
             if t > self._sim_start + sim_time:
                 return {
+                    'id': x and x.get('id', None),
                     'timestamp': str(t),
                     'top_bid': bids and {
                         'price': bids[0][0],
-                        'size':  bids[0][1]
+                        'size': bids[0][1]
                     },
                     'top_ask': asks and {
                         'price': asks[0][0],
-                        'size':  asks[0][1]
+                        'size': asks[0][1]
                     }
                 }
 
     @route('/order')
     def handle_sell(self, x):
-        """ Tries to clear an order.  Expects query parameters for 'price', 
-            'quantity', and 'side'.
+        """ Tries to clear an order.  Expects query parameters for 'id',
+            'price', 'qty', and 'side'.
         """
         sim_time = datetime.now() - self._rt_start
-        print 'Sell received @ t%s for %s' % (sim_time, x)
+        print 'Order received @ t%s for %s' % (sim_time, x)
         for t, bids, asks in self._data:
             if t > self._sim_start + sim_time:
                 avg_price = 0
@@ -267,12 +275,12 @@ class App(object):
                     self._book[side] = result[1]
                     avg_price = round(result[0] / size, 2)
                 return {
-                    'side'     : x['side'],
+                    'id': x['id'],
+                    'side': x['side'],
                     'timestamp': str(t),
                     'avg_price': avg_price,
-                    'qty':       avg_price and size,
+                    'qty': avg_price and size,
                 }
-                
 
 ################################################################################
 #
