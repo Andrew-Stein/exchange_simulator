@@ -14,6 +14,10 @@ To start the example client:
 
 	python client.py
 
+To reset the sample data:
+
+	rm test.csv
+
 API Examples
 ============
 See also [client.py](https://github.com/texodus/exchange_simulator/blob/master/client.py)

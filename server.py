@@ -40,6 +40,7 @@ from SocketServer   import ThreadingMixIn
 
 # Sim params
 
+REALTIME    = True
 SIM_LENGTH  = timedelta(hours = 8)
 MARKET_OPEN = datetime.today().replace(hour = 0, minute = 30, second = 0)
 
@@ -65,7 +66,7 @@ def bwalk(min, max, std):
         yield abs((max % (rng * 2)) - rng) + min
 
 def market(t0 = MARKET_OPEN):
-    """ Generates a random series of market conditions, 
+    """ Generates a random series of market conditions,
         (time, price, spread). 
     """
     for ms, px, spd in izip(bwalk(*FREQ), bwalk(*PX), bwalk(*SPD)):
@@ -236,51 +237,55 @@ class App(object):
         self._rt_start = datetime.now()
         self._sim_start, _, _  = self._data.next()
 
+    @property
+    def _current_book(self):
+        for t, bids, asks in self._data:
+            if REALTIME:
+                while t > self._sim_start + (datetime.now() - self._rt_start):
+                    yield t, bids, asks
+            else:
+                yield t, bids, asks
+
     @route('/query')
     def handle_query(self, x):
         """ Takes no arguments, and yields the current top of the book;  the
             best bid and ask and their sizes.
         """
-        sim_time = datetime.now() - self._rt_start
-        print 'Query received @ t%s' % sim_time
-        for t, bids, asks in self._data:
-            if t > self._sim_start + sim_time:
-                return {
-                    'id': x and x.get('id', None),
-                    'timestamp': str(t),
-                    'top_bid': bids and {
-                        'price': bids[0][0],
-                        'size': bids[0][1]
-                    },
-                    'top_ask': asks and {
-                        'price': asks[0][0],
-                        'size': asks[0][1]
-                    }
-                }
+        t, bids, asks = self._current_book.next()
+        print 'Query received @ t%s' % t
+        return {
+            'id': x and x.get('id', None),
+            'timestamp': str(t),
+            'top_bid': bids and {
+                'price': bids[0][0],
+                'size': bids[0][1]
+            },
+            'top_ask': asks and {
+                'price': asks[0][0],
+                'size': asks[0][1]
+            }
+        }
 
     @route('/order')
     def handle_sell(self, x):
         """ Tries to clear an order.  Expects query parameters for 'id',
             'price', 'qty', and 'side'.
         """
-        sim_time = datetime.now() - self._rt_start
-        print 'Order received @ t%s for %s' % (sim_time, x)
-        for t, bids, asks in self._data:
-            if t > self._sim_start + sim_time:
-                avg_price = 0
-                size, price = float(x['qty']), float(x['price'])
-                side = 'buy' if x['side'] == 'sell' else 'sell'
-                result = clear_order(price, size, self._book[side], ops[side])
-                if result:
-                    self._book[side] = result[1]
-                    avg_price = round(result[0] / size, 2)
-                return {
-                    'id': x['id'],
-                    'side': x['side'],
-                    'timestamp': str(t),
-                    'avg_price': avg_price,
-                    'qty': avg_price and size,
-                }
+        t, bids, asks = self._current_book.next()
+        print 'Order received @ t%s for %s' % (t, x)
+        size, px = float(x['qty']), float(x['price'])
+        side     = 'buy' if x['side'] == 'sell' else 'sell'
+        result   = clear_order(px, size, self._book[side], ops[side])
+        if result:
+            self._book[side] = result[1]
+            avg_price = round(result[0] / size, 2)
+        return {
+            'id': x['id'],
+            'side': x['side'],
+            'timestamp': str(t),
+            'avg_price': avg_price,
+            'qty': avg_price and size,
+        }
 
 ################################################################################
 #
